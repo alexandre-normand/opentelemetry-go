@@ -19,6 +19,7 @@ import (
 
 	"go.opentelemetry.io/otel/api/core"
 	export "go.opentelemetry.io/otel/sdk/export/metric"
+	"log"
 )
 
 type (
@@ -55,6 +56,7 @@ var _ export.Batcher = &Batcher{}
 var _ export.CheckpointSet = &checkpointSet{}
 
 func New(selector export.AggregationSelector, labelEncoder export.LabelEncoder, stateful bool) *Batcher {
+	log.Printf("Selector is %v", selector)
 	return &Batcher{
 		selector:      selector,
 		labelEncoder:  labelEncoder,
@@ -65,6 +67,7 @@ func New(selector export.AggregationSelector, labelEncoder export.LabelEncoder, 
 }
 
 func (b *Batcher) AggregatorFor(descriptor *export.Descriptor) export.Aggregator {
+	log.Printf("Getting aggregator for %v: %v", descriptor, b.selector.AggregatorFor(descriptor))
 	return b.selector.AggregatorFor(descriptor)
 }
 

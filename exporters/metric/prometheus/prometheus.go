@@ -44,7 +44,8 @@ type Exporter struct {
 	snapshot export.CheckpointSet
 	onError  func(error)
 
-	defaultSummaryQuantiles []float64
+	defaultSummaryQuantiles    []float64
+	defaultHistogramBoundaries []core.Number
 }
 
 var _ export.Exporter = &Exporter{}
@@ -69,6 +70,8 @@ type Config struct {
 	//
 	// If not specified the Registry will be used as default.
 	Gatherer prometheus.Gatherer
+
+	DefaultHistogramBoundaries []core.Number
 
 	// DefaultSummaryQuantiles is the default summary quantiles
 	// to use. Use nil to specify the system-default summary quantiles.
@@ -101,11 +104,12 @@ func NewRawExporter(config Config) (*Exporter, error) {
 	}
 
 	e := &Exporter{
-		handler:                 promhttp.HandlerFor(config.Gatherer, promhttp.HandlerOpts{}),
-		registerer:              config.Registerer,
-		gatherer:                config.Gatherer,
-		defaultSummaryQuantiles: config.DefaultSummaryQuantiles,
-		onError:                 config.OnError,
+		handler:                    promhttp.HandlerFor(config.Gatherer, promhttp.HandlerOpts{}),
+		registerer:                 config.Registerer,
+		gatherer:                   config.Gatherer,
+		defaultSummaryQuantiles:    config.DefaultSummaryQuantiles,
+		defaultHistogramBoundaries: config.DefaultHistogramBoundaries,
+		onError:                    config.OnError,
 	}
 
 	c := newCollector(e)
@@ -139,7 +143,7 @@ func InstallNewPipeline(config Config) (*push.Controller, http.HandlerFunc, erro
 // NewExportPipeline sets up a complete export pipeline with the recommended setup,
 // chaining a NewRawExporter into the recommended selectors and batchers.
 func NewExportPipeline(config Config, period time.Duration) (*push.Controller, http.HandlerFunc, error) {
-	selector := simple.NewWithExactMeasure()
+	selector := simple.NewWithHistogram(config.DefaultHistogramBoundaries)
 	exporter, err := NewRawExporter(config)
 	if err != nil {
 		return nil, nil, err
@@ -204,10 +208,9 @@ func (c *collector) Collect(ch chan<- prometheus.Metric) {
 		labels := labelValues(record.Labels())
 		desc := c.toDesc(&record)
 
-		// TODO: implement histogram export when the histogram aggregation is done.
-		//  https://github.com/open-telemetry/opentelemetry-go/issues/317
-
-		if dist, ok := agg.(aggregator.Distribution); ok {
+		if hist, ok := agg.(aggregator.Histogram); ok {
+			c.exportHistogram(ch, hist, numberKind, desc, labels)
+		} else if dist, ok := agg.(aggregator.Distribution); ok {
 			// TODO: summaries values are never being resetted.
 			//  As measures are recorded, new records starts to have less impact on these summaries.
 			//  We should implement an solution that is similar to the Prometheus Clients
@@ -278,6 +281,34 @@ func (c *collector) exportSummary(ch chan<- prometheus.Metric, dist aggregator.D
 	}
 
 	m, err := prometheus.NewConstSummary(desc, uint64(count), sum.CoerceToFloat64(kind), quantiles, labels...)
+	if err != nil {
+		c.exp.onError(err)
+		return
+	}
+
+	ch <- m
+}
+
+func (c *collector) exportHistogram(ch chan<- prometheus.Metric, hist aggregator.Histogram, kind core.NumberKind, desc *prometheus.Desc, labels []string) {
+	buckets, err := hist.Histogram()
+	if err != nil {
+		c.exp.onError(err)
+		return
+	}
+
+	bucketCounts := make(map[float64]uint64)
+	count := uint64(0)
+	sum := 0.
+	for i, boundary := range buckets.Boundaries {
+		b := boundary.CoerceToFloat64(kind)
+		c := buckets.Counts[i].CoerceToUint64(kind)
+
+		bucketCounts[b] = c
+		count = count + c
+		sum = sum + float64(c)*b
+	}
+
+	m, err := prometheus.NewConstHistogram(desc, count, sum, bucketCounts, labels...)
 	if err != nil {
 		c.exp.onError(err)
 		return
